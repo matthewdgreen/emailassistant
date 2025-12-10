@@ -1,0 +1,546 @@
+tasks.txt
+=========
+
+LLM-ASSISTED EMAIL TRIAGE & TASK MANAGER (PYTHON)
+-------------------------------------------------
+Legend: Use [ ] to mark not started, [x] for done.
+
+==================================================
+SECTION 0 — PROJECT SETUP & ENVIRONMENT
+==================================================
+
+[ ] 0.1  Create a new git repository for the project.
+[ ] 0.2  Initialize a Python virtual environment (e.g., venv or uv/poetry).
+[ ] 0.3  Create a base project structure:
+
+         /
+         ├─ README.md
+         ├─ pyproject.toml or requirements.txt
+         ├─ .gitignore
+         ├─ .env.example
+         ├─ main.py
+         └─ email_triage/
+             ├─ __init__.py
+             ├─ config.py
+             ├─ logging_config.py
+             ├─ models.py
+             ├─ storage.py
+             ├─ gmail_client.py
+             ├─ llm_client.py
+             ├─ prompts.py
+             ├─ analysis_engine.py
+             ├─ daily_runner.py
+             └─ cli.py
+
+[ ] 0.4  Add basic dependencies to requirements/pyproject:
+         - google-api-python-client
+         - google-auth
+         - google-auth-oauthlib
+         - python-dotenv
+         - httpx or requests
+         - pydantic (or dataclasses-json)
+         - rich (optional, for nice CLI output)
+         - pytest (for tests)
+
+[ ] 0.5  Set up a minimal README.md describing the project and high-level goals.
+[ ] 0.6  Configure .gitignore to exclude:
+         - venv/.venv
+         - __pycache__/
+         - .env
+         - token.json (Gmail OAuth token)
+         - *.pyc
+         - .DS_Store
+
+==================================================
+SECTION 1 — CONFIGURATION & LOGGING
+==================================================
+
+[ ] 1.1  Define configuration sources:
+         - Environment variables via .env (for API keys, paths).
+         - Optional config file (e.g., config.toml or config.yaml) if desired.
+
+[ ] 1.2  In email_triage/config.py:
+         - Implement a Config class (Pydantic BaseSettings or custom) with:
+           * gmail_token_path
+           * gmail_credentials_path
+           * openai_api_key (or other LLM provider key)
+           * known_senders_path (e.g., data/known_senders.json)
+           * tasks_path (e.g., data/tasks.json)
+           * state_path (e.g., data/state.json for last_run timestamp)
+           * daily_summary_output_path (e.g., data/daily_summary.md or .txt)
+           * default_timezone
+           * max_emails_per_run
+           * model_name (for the LLM)
+         - Implement a `load_config()` function to instantiate Config.
+
+[ ] 1.3  In email_triage/logging_config.py:
+         - Configure Python logging with:
+           * Console handler (INFO by default, DEBUG if configured).
+           * Optional file handler (log/email_triage.log).
+         - Provide `setup_logging()` that main.py can call once.
+
+==================================================
+SECTION 2 — DATA MODELS & SCHEMAS
+==================================================
+
+[ ] 2.1  Decide modeling library:
+         - Use Pydantic for validation & (de)serialization.
+
+[ ] 2.2  In email_triage/models.py, define core models:
+
+         EmailSummary:
+         - id: str               (Gmail message ID)
+         - thread_id: str
+         - sender_name: str | None
+         - sender_email: str
+         - received_at: datetime
+         - subject: str
+         - snippet: str | None
+
+         EmailBody:
+         - id: str               (message ID)
+         - thread_id: str
+         - body_text: str        (plain text)
+         - body_html: str | None (optional)
+
+         SenderImportance: Enum
+         - HIGH, NORMAL, LOW
+
+         SenderRole: Enum
+         - STUDENT, COLLABORATOR, ADMIN, FAMILY, NOTIFICATION, OTHER
+
+         SenderProfile:
+         - email: str
+         - name: str | None
+         - importance: SenderImportance
+         - role: SenderRole
+         - notes: str
+         - last_seen_at: datetime | None
+         - pinned: bool
+
+         ThreadStatus: Enum
+         - ACTIVE, COLD, ARCHIVED
+
+         ThreadPolicy:
+         - thread_id: str
+         - project: str | None
+         - expected_next_action: str | None  ("ME", "THEM", "NONE")
+         - due_date: date | None
+         - status: ThreadStatus
+         - notes: str | None
+
+         TaskStatus: Enum
+         - OPEN, IN_PROGRESS, DONE, SNOOZED
+
+         TaskSource: Enum
+         - EMAIL, MANUAL, OTHER
+
+         Task:
+         - id: str
+         - source: TaskSource
+         - email_thread_id: str | None
+         - description: str
+         - status: TaskStatus
+         - priority: int           (1–10)
+         - due_date: date | None
+         - tags: list[str]
+         - created_at: datetime
+         - updated_at: datetime
+         - origin_email_id: str | None        (message that created the task)
+
+         TaskOperationType: Enum
+         - ADD, UPDATE, CLOSE
+
+         TaskOperation:
+         - op: TaskOperationType
+         - task_id: str | None          (for UPDATE/CLOSE)
+         - task: Task | None            (for ADD)
+         - fields: dict[str, Any] | None (for UPDATE)
+
+         CriticalEmailEntry:
+         - email_id: str
+         - thread_id: str
+         - summary: str
+         - reason_critical: str
+         - recommended_action: str
+         - linked_task_ids: list[str]
+
+         SuggestedResponse:
+         - email_id: str
+         - draft_outline: list[str]
+         - full_draft: str | None       (optional, for complete drafts)
+
+         DailySummary:
+         - date: date
+         - critical_emails: list[CriticalEmailEntry]
+         - suggested_responses: list[SuggestedResponse]
+         - other_notes: str | None
+
+[ ] 2.3  Define container models for file-based persistence:
+
+         KnownSendersFile:
+         - senders: list[SenderProfile]
+         - thread_policies: list[ThreadPolicy]
+
+         TasksFile:
+         - tasks: list[Task]
+
+         StateFile:
+         - last_run_at: datetime | None
+
+[ ] 2.4  Add Pydantic config (model_config) to ensure:
+         - JSON-friendly serialization.
+         - Timezone-aware datetimes or explicit timezone policy.
+
+==================================================
+SECTION 3 — STORAGE LAYER (JSON FILES)
+==================================================
+
+[ ] 3.1  Create a /data directory in the repo for default JSON files.
+
+[ ] 3.2  In email_triage/storage.py:
+
+         - Implement helper functions:
+           * ensure_data_files_exist(config: Config):
+             - If known_senders_path does not exist, create with empty KnownSendersFile structure.
+             - If tasks_path does not exist, create with empty TasksFile structure.
+             - If state_path does not exist, create with default StateFile.
+
+           * load_known_senders(config: Config) -> KnownSendersFile
+             - Read JSON, parse via KnownSendersFile model.
+
+           * save_known_senders(config: Config, data: KnownSendersFile) -> None
+             - Serialize KnownSendersFile to JSON.
+
+           * load_tasks(config: Config) -> TasksFile
+
+           * save_tasks(config: Config, data: TasksFile) -> None
+
+           * load_state(config: Config) -> StateFile
+
+           * save_state(config: Config, data: StateFile) -> None
+
+[ ] 3.3  Implement basic locking or atomic write strategy (optional but recommended):
+         - Write to temp file and then rename to prevent partial writes.
+
+[ ] 3.4  Add basic unit tests for storage functions with temporary file paths.
+
+==================================================
+SECTION 4 — GMAIL INTEGRATION
+==================================================
+
+[ ] 4.1  Enable Gmail API in Google Cloud Console and download credentials.json.
+[ ] 4.2  Place credentials file at the path expected by config.gmail_credentials_path.
+[ ] 4.3  In email_triage/gmail_client.py, implement OAuth flow:
+
+         - Function: build_gmail_service(config: Config)
+           * If token.json (config.gmail_token_path) exists, load credentials.
+           * Otherwise run browser-based OAuth flow to generate token.json.
+           * Return an authorized Gmail API service object.
+
+[ ] 4.4  Implement function: list_unread_summaries_since(service, since_datetime, max_results) -> list[EmailSummary]
+         - Use Gmail API users().messages().list with query like:
+           "label:INBOX is:unread after:UNIX_TIMESTAMP"
+         - For each message ID:
+           * Call users().messages().get (format="metadata" with relevant headers).
+           * Extract:
+             - From (sender name + email)
+             - Date (parse to datetime)
+             - Subject
+             - Snippet
+           * Map to EmailSummary model.
+
+[ ] 4.5  Implement function: fetch_email_bodies(service, message_ids: list[str]) -> list[EmailBody]
+         - For each message_id:
+           * Call users().messages().get (format="full").
+           * Extract plaintext body (handle multipart/alternative MIME).
+           * Optionally also extract HTML body.
+           * Map to EmailBody model.
+
+[ ] 4.6  Implement optional helper: mark_messages_as_read(service, message_ids: list[str])
+         - Use modify API to remove UNREAD label when/if desired (optional).
+
+[ ] 4.7  Implement optional helper: send_gmail_message(service, to, subject, body_text) for later:
+         - Build MIMEText.
+         - Base64-url encode and send via users().messages().send.
+
+[ ] 4.8  Add basic error handling and logging for Gmail calls (rate limits, HTTP errors).
+
+==================================================
+SECTION 5 — LLM CLIENT & PROMPTS
+==================================================
+
+[ ] 5.1  In email_triage/llm_client.py:
+         - Implement a simple LLM client wrapper using chosen provider:
+           * Load API key from config.
+           * Provide `call_model(messages, model_name, max_tokens, temperature)` helper.
+           * Handle HTTP errors and retries.
+
+[ ] 5.2  Decide JSON output strategy:
+         - Use function that:
+           * Takes a prompt & structured instruction.
+           * Calls the LLM.
+           * Parses JSON from the response.
+           * Raises clear error if JSON invalid.
+
+[ ] 5.3  In email_triage/prompts.py:
+
+         - Define a prompt template for PASS 1 (metadata-only pass):
+
+           Function: build_pass1_prompt(unread_summaries, known_senders, tasks)
+           - Instructions to the model:
+             * You receive:
+               - List of unread email summaries (no bodies).
+               - List of known senders with importance/roles.
+               - Current task list.
+             * Your goals:
+               1. Decide which emails might be important or require actions.
+               2. Decide which emails you need full bodies for.
+               3. Propose task operations (add/update/close) based on metadata.
+             * Output JSON with:
+               - "emails_to_expand": ["message_id", ...]
+               - "task_ops": [TaskOperation objects, using the schema].
+
+         - Define a prompt template for PASS 2 (with bodies):
+
+           Function: build_pass2_prompt(expanded_emails, known_senders, tasks, preliminary_task_ops)
+           - Instructions:
+             * You now see bodies of selected emails.
+             * Refine your understanding, adjust task operations, and update sender profiles.
+             * Output JSON with:
+               - "updated_senders": list of SenderProfile changes or patches.
+               - "final_task_ops": list of TaskOperation objects.
+               - "daily_summary": DailySummary object.
+
+[ ] 5.4  Implement small utilities to:
+         - Serialize models to primitive dicts suitable for JSON prompts.
+         - Ensure prompts remain under token limits (e.g., limit number of emails, truncate long subjects/snippets).
+
+==================================================
+SECTION 6 — TASK & SENDER UPDATE LOGIC
+==================================================
+
+[ ] 6.1  In email_triage/analysis_engine.py, define operation-application utilities:
+
+         - Function: apply_task_operations(tasks_file: TasksFile, ops: list[TaskOperation]) -> TasksFile
+           * For each op:
+             - ADD:
+               + Generate new task ID if not provided.
+               + Validate required fields.
+               + Append to tasks list.
+             - UPDATE:
+               + Find task by task_id.
+               + Apply fields from `fields` dict.
+               + Update `updated_at`.
+             - CLOSE:
+               + Find task and set status = DONE, update updated_at.
+           * Return updated TasksFile.
+
+[ ] 6.2  Implement function: merge_sender_updates(known_senders: KnownSendersFile, updated_senders_payload) -> KnownSendersFile
+         - Support either:
+           * Full SenderProfile replacement, or
+           * Partial updates (patches) based on email address key.
+
+[ ] 6.3  Implement helper functions for analysis:
+
+         - find_or_create_sender_profile(email, name) -> SenderProfile
+           * If sender exists, update last_seen_at.
+           * If not, create with default importance/role.
+
+         - update_thread_policy(known_senders, thread_id, new_policy_data) -> None
+
+[ ] 6.4  Add safeguards:
+         - Prevent LLM from deleting all tasks accidentally:
+           * If op list tries to clear everything, optionally require human confirmation (for now, maybe log a warning and skip).
+         - Validate that all referenced task_ids exist before applying operations; log and skip invalid ones.
+
+==================================================
+SECTION 7 — ANALYSIS ENGINE WORKFLOW (TWO-PASS)
+==================================================
+
+[ ] 7.1  In email_triage/analysis_engine.py, implement main orchestration function:
+
+         Function: run_daily_analysis(config: Config) -> DailySummary
+         Steps:
+           1. setup_logging() (in caller).
+           2. ensure_data_files_exist(config).
+           3. Load state, known_senders, tasks.
+           4. Build Gmail service.
+           5. Determine `since_datetime`:
+              - Use state.last_run_at if present; otherwise, some default (e.g., 24 hours).
+           6. Call list_unread_summaries_since() to get EmailSummary list.
+           7. If no unread emails:
+              - Optionally still produce a DailySummary with "no new critical emails".
+           8. Build pass1 prompt with summaries + known_senders + tasks.
+           9. Call LLM client for pass1, parse JSON result:
+              - Extract `emails_to_expand` and preliminary `task_ops`.
+           10. Fetch bodies for `emails_to_expand` via fetch_email_bodies().
+           11. Build pass2 prompt with:
+              - expanded_emails,
+              - known_senders,
+              - tasks,
+              - preliminary task_ops.
+           12. Call LLM client for pass2, parse JSON result:
+              - Extract `updated_senders`, `final_task_ops`, `daily_summary`.
+           13. Apply `final_task_ops` to TasksFile via apply_task_operations().
+           14. Merge `updated_senders` into KnownSendersFile via merge_sender_updates().
+           15. Update StateFile.last_run_at to now.
+           16. Persist updated known_senders, tasks, state.
+           17. Return DailySummary model.
+
+[ ] 7.2  Implement helper to map LLM JSON objects back into Pydantic models:
+         - Parse DailySummary, TaskOperation, SenderProfile from raw dicts.
+         - Validate and handle errors gracefully.
+
+[ ] 7.3  Add logging at key steps:
+         - Number of unread emails.
+         - Number of emails expanded.
+         - Number of tasks added/updated/closed.
+         - Any parsing or validation errors from LLM.
+
+==================================================
+SECTION 8 — DAILY SUMMARY OUTPUT
+==================================================
+
+[ ] 8.1  In email_triage/daily_runner.py, implement:
+
+         Function: generate_daily_summary_text(summary: DailySummary) -> str
+         - Produce a human-readable text/markdown summary like:
+
+           # Daily Email Triage — YYYY-MM-DD
+
+           ## Critical Emails
+           1. [thread_id / subject / sender]
+              - Summary: ...
+              - Reason: ...
+              - Recommended action: ...
+              - Linked tasks: task-001, task-003
+
+           ## Suggested Responses
+           - Email ID ...:
+             * Outline bullet list
+             * Optional full draft (if requested in prompt)
+
+           ## Other Notes
+           - ...
+
+[ ] 8.2  Implement function: write_daily_summary_to_file(config: Config, summary_text: str) -> Path
+         - Write to daily_summary_output_path (or a dated file like data/summaries/YYYY-MM-DD.md).
+
+[ ] 8.3  Implement optional helper: send_daily_summary_via_email(service, config, summary_text)
+         - Uses send_gmail_message() to send summary to your own address.
+
+[ ] 8.4  Ensure main orchestrator (in main.py or cli.py) can:
+         - Run analysis.
+         - Generate summary text.
+         - Save summary.
+         - Optionally email summary.
+
+==================================================
+SECTION 9 — CLI / INTERACTIVE COMMANDS
+==================================================
+
+[ ] 9.1  In email_triage/cli.py, add a simple CLI using argparse or click:
+
+         Commands:
+         - `run-daily`:
+           * Run full daily analysis flow and output summary to stdout.
+         - `show-tasks`:
+           * Load tasks.json and print current tasks sorted by priority/due date.
+         - `mark-task-done TASK_ID`:
+           * Update task status to DONE and update timestamps.
+         - `add-manual-task "description"`:
+           * Add a manual task with default priority and no email_thread_id.
+
+[ ] 9.2  Wire main.py to dispatch to CLI:
+
+         if __name__ == "__main__":
+             from email_triage.cli import main
+             main()
+
+[ ] 9.3  Implement nice formatting with rich (optional) for `show-tasks` output.
+
+==================================================
+SECTION 10 — TESTS & VALIDATION
+==================================================
+
+[ ] 10.1 Create tests/ directory with:
+
+         tests/
+           ├─ test_models.py
+           ├─ test_storage.py
+           ├─ test_analysis_engine.py
+           └─ test_gmail_client.py  (where feasible with mocks)
+
+[ ] 10.2 Write model tests:
+         - Validate that model instances serialize/deserialize to JSON as expected.
+         - Test enum conversions and default values.
+
+[ ] 10.3 Write storage tests:
+         - Use temporary directories to test load/save for KnownSendersFile, TasksFile, StateFile.
+         - Test behavior when files are missing (ensure created with defaults).
+
+[ ] 10.4 Write analysis_engine tests (with mocked LLM and Gmail):
+         - Mock Gmail client functions to return fixed EmailSummary/EmailBody objects.
+         - Mock LLM client to return deterministic JSON for pass1 and pass2.
+         - Verify that:
+           * Tasks are added/updated/closed correctly.
+           * Known senders are updated as expected.
+           * DailySummary is produced with expected content.
+
+[ ] 10.5 Add simple integration test:
+         - Using a small set of sample emails (stored in fixtures).
+         - Run run_daily_analysis() end-to-end with mocked clients.
+         - Assert on resulting tasks and summary.
+
+==================================================
+SECTION 11 — DEPLOYMENT & AUTOMATION
+==================================================
+
+[ ] 11.1 Create a simple script or Makefile target:
+         - `make run-daily` -> invokes `python -m email_triage.cli run-daily`.
+
+[ ] 11.2 Set up a local cron job or scheduled task:
+         - Runs `run-daily` once per day at a chosen time.
+         - Logs output to a file.
+
+[ ] 11.3 (Optional) Containerization:
+         - Write a Dockerfile to:
+           * Install dependencies.
+           * Copy project files.
+           * Run the daily job (or provide entrypoint for CLI).
+
+[ ] 11.4 (Optional) Remote deployment:
+         - Deploy container or script to a small VPS / cloud function / Cloud Run.
+         - Configure secrets via environment variables.
+         - Configure scheduled trigger (e.g., Cloud Scheduler).
+
+==================================================
+SECTION 12 — FUTURE ENHANCEMENTS (OPTIONAL, NOT MVP)
+==================================================
+
+[ ] 12.1 Add full email drafting support:
+         - Extend SuggestedResponse to include full_draft string.
+         - Implement CLI command `draft-reply EMAIL_ID` that:
+           * Calls LLM to generate a full email draft.
+           * Uses Gmail API to create a draft in Gmail.
+
+[ ] 12.2 Add project tagging:
+         - Allow tasks and thread_policies to include project tags.
+         - Let prompts and summaries reason about projects (e.g., “NSF-SATC-2026”).
+
+[ ] 12.3 Add simple web UI (Flask/FastAPI + HTMX or similar) to:
+         - Display daily summaries.
+         - Edit tasks and sender importance in a browser.
+
+[ ] 12.4 Replace JSON files with SQLite or Postgres for robustness:
+         - Define equivalent DB schema.
+         - Replace storage layer while keeping the rest of the code unchanged.
+
+[ ] 12.5 Improve safety:
+         - Add guardrails on LLM output size.
+         - Add stricter schema validation and automatic fallback behavior when parsing fails.
+
+==================================================
+END OF tasks.txt
+==================================================
