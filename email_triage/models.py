@@ -2,11 +2,11 @@
 Pydantic models for email summaries, senders, tasks, and daily summaries.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -30,16 +30,16 @@ class SenderRole(str, Enum):
 
 
 class ThreadStatus(str, Enum):
-    ACTIVE = "active"
-    COLD = "cold"
-    ARCHIVED = "archived"
+    OPEN = "open"
+    CLOSED = "closed"
+    SNOOZED = "snoozed"
+    IGNORED = "ignored"
 
 
 class TaskStatus(str, Enum):
     OPEN = "open"
     IN_PROGRESS = "in_progress"
     DONE = "done"
-    SNOOZED = "snoozed"
 
 
 class TaskSource(str, Enum):
@@ -55,24 +55,24 @@ class TaskOperationType(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Core email models
+# Email summaries and bodies
 # ---------------------------------------------------------------------------
 
 
 class EmailSummary(BaseModel):
     """
-    Minimal information about an email used in the first LLM pass.
+    Lightweight summary of a Gmail message.
+
+    Used during the first pass to decide which emails to expand.
     """
 
     id: str
     thread_id: str
+    subject: str = ""
+    sender_email: str = ""
+    received_at: Optional[datetime] = None
 
-    sender_name: Optional[str] = None
-    sender_email: str
-
-    received_at: datetime
-
-    subject: str
+    # Optional extra metadata
     snippet: Optional[str] = None
 
     model_config = ConfigDict(
@@ -83,41 +83,18 @@ class EmailSummary(BaseModel):
 
 class EmailBody(BaseModel):
     """
-    Full email body for messages the LLM has requested to expand.
+    Full email body and metadata for deeper analysis.
+
+    Used in the second pass once we've decided which emails to expand.
     """
 
     id: str
     thread_id: str
-
-    body_text: str
-    body_html: Optional[str] = None
-
-    model_config = ConfigDict(
-        populate_by_name=True,
-        arbitrary_types_allowed=False,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Sender and thread metadata
-# ---------------------------------------------------------------------------
-
-
-class SenderProfile(BaseModel):
-    """
-    Persistent profile for a sender: importance, role, notes, etc.
-    """
-
-    email: str
-    name: Optional[str] = None
-
-    importance: SenderImportance = SenderImportance.NORMAL
-    role: SenderRole = SenderRole.OTHER
-
-    notes: str = ""
-    last_seen_at: Optional[datetime] = None
-
-    pinned: bool = False  # for VIPs you never want downgraded by the model
+    subject: str = ""
+    sender_email: str = ""
+    received_at: Optional[datetime] = None
+    snippet: Optional[str] = None
+    body_text: str = ""
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -126,25 +103,22 @@ class SenderProfile(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Sender and thread metadata
+# Sender profiles and thread policy
 # ---------------------------------------------------------------------------
 
 
 class SenderProfile(BaseModel):
     """
-    Persistent profile for a sender: importance, role, notes, etc.
+    Metadata about a sender used to drive prioritization.
     """
 
     email: str
     name: Optional[str] = None
-
     importance: SenderImportance = SenderImportance.NORMAL
     role: SenderRole = SenderRole.OTHER
-
-    notes: str = ""
+    pinned: bool = False
+    notes: Optional[str] = None
     last_seen_at: Optional[datetime] = None
-
-    pinned: bool = False  # for VIPs you never want downgraded by the model
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -154,18 +128,11 @@ class SenderProfile(BaseModel):
 
 class ThreadPolicy(BaseModel):
     """
-    Per-thread metadata, usually tied to a project or deadline.
+    Optional per-thread policy (not heavily used yet, but kept for extensibility).
     """
 
     thread_id: str
-    project: Optional[str] = None
-
-    # "ME", "THEM", "NONE" (string for flexibility; could be enum later)
-    expected_next_action: Optional[str] = None
-
-    due_date: Optional[date] = None
-    status: ThreadStatus = ThreadStatus.ACTIVE
-
+    status: ThreadStatus = ThreadStatus.OPEN
     notes: Optional[str] = None
 
     model_config = ConfigDict(
@@ -175,43 +142,57 @@ class ThreadPolicy(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Tasks and operations
+# Tasks and task operations
 # ---------------------------------------------------------------------------
 
 
 class Task(BaseModel):
     """
-    Persistent task object, possibly linked to an email thread.
+    A single task in the user's task list.
+
+    Note: id is optional for newly created tasks coming from the LLM; the
+    system will assign a concrete id before persisting.
     """
 
-    id: str
-
-    source: TaskSource = TaskSource.EMAIL
-    email_thread_id: Optional[str] = None  # Gmail thread ID
-
+    id: Optional[str] = None
     description: str
     status: TaskStatus = TaskStatus.OPEN
-
-    priority: int = Field(
-        default=5,
-        ge=1,
-        le=10,
-        description="Integer priority (1–10), higher means more important.",
-    )
-
+    priority: int = 5
     due_date: Optional[date] = None
-    tags: List[str] = Field(default_factory=list)
+    source: Optional[TaskSource] = None
+    email_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.utcnow(),
-        description="When the task was created (UTC).",
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.utcnow(),
-        description="When the task was last updated (UTC).",
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, v: int) -> int:
+        if not 1 <= v <= 10:
+            raise ValueError("priority must be between 1 and 10")
+        return v
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=False,
     )
 
-    origin_email_id: Optional[str] = None  # message that gave rise to this task
+
+class TaskUpdateFields(BaseModel):
+    """
+    Partial set of fields that may be updated on a Task.
+    """
+
+    description: Optional[str] = None
+    status: Optional[TaskStatus] = None
+    priority: Optional[int] = None
+    due_date: Optional[date] = None
+
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not 1 <= v <= 10:
+            raise ValueError("priority must be between 1 and 10")
+        return v
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -221,38 +202,54 @@ class Task(BaseModel):
 
 class TaskOperation(BaseModel):
     """
-    Operation emitted by the LLM to modify the task list.
+    Operation describing how to mutate the task list.
 
-    - ADD:    provide 'task'
-    - UPDATE: provide 'task_id' and 'fields'
-    - CLOSE:  provide 'task_id'
+    - add:    create a new task (task.id may be omitted; assigned by system)
+    - update: modify an existing task (requires task_id and fields)
+    - close:  mark an existing task as done (requires task_id)
     """
 
     op: TaskOperationType
-
-    task_id: Optional[str] = None
     task: Optional[Task] = None
-    fields: Optional[Dict[str, Any]] = None
+    task_id: Optional[str] = None
+    fields: Optional[TaskUpdateFields] = None
+
+    @model_validator(mode="after")
+    def check_consistency(self) -> "TaskOperation":
+        if self.op == TaskOperationType.ADD:
+            if self.task is None:
+                raise ValueError("ADD operation requires 'task'")
+        elif self.op == TaskOperationType.UPDATE:
+            if not self.task_id:
+                raise ValueError("UPDATE operation requires 'task_id'")
+            if self.fields is None:
+                raise ValueError("UPDATE operation requires 'fields'")
+        elif self.op == TaskOperationType.CLOSE:
+            if not self.task_id:
+                raise ValueError("CLOSE operation requires 'task_id'")
+        return self
 
     model_config = ConfigDict(
         populate_by_name=True,
-        arbitrary_types_allowed=True,  # allow arbitrary update fields; validate later
+        arbitrary_types_allowed=False,
     )
 
 
 # ---------------------------------------------------------------------------
-# Daily summary models
+# Daily summary
 # ---------------------------------------------------------------------------
 
 
 class CriticalEmailEntry(BaseModel):
+    """
+    One critical email entry in the daily summary.
+    """
+
     email_id: str
     thread_id: str
-
     summary: str
     reason_critical: str
     recommended_action: str
-
     linked_task_ids: List[str] = Field(default_factory=list)
 
     model_config = ConfigDict(
@@ -262,9 +259,12 @@ class CriticalEmailEntry(BaseModel):
 
 
 class SuggestedResponse(BaseModel):
-    email_id: str
+    """
+    Suggested response for an email, possibly including a full draft.
+    """
 
-    draft_outline: List[str] = Field(default_factory=list)
+    email_id: str
+    draft_outline: List[str]
     full_draft: Optional[str] = None
 
     model_config = ConfigDict(
@@ -272,16 +272,15 @@ class SuggestedResponse(BaseModel):
         arbitrary_types_allowed=False,
     )
 
+
 class DailySummary(BaseModel):
     """
-    High-level summary produced each day for the human.
+    High-level summary of a day's worth of email triage.
     """
 
-    summary_date: date = Field(default_factory=date.today)
-
+    summary_date: date
     critical_emails: List[CriticalEmailEntry] = Field(default_factory=list)
     suggested_responses: List[SuggestedResponse] = Field(default_factory=list)
-
     other_notes: Optional[str] = None
 
     model_config = ConfigDict(
@@ -291,17 +290,16 @@ class DailySummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# File container models
+# File-level containers
 # ---------------------------------------------------------------------------
 
 
 class KnownSendersFile(BaseModel):
     """
-    Container model for known_senders.json.
+    Container for known_senders.json.
     """
 
     senders: List[SenderProfile] = Field(default_factory=list)
-    thread_policies: List[ThreadPolicy] = Field(default_factory=list)
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -311,7 +309,7 @@ class KnownSendersFile(BaseModel):
 
 class TasksFile(BaseModel):
     """
-    Container model for tasks.json.
+    Container for tasks.json.
     """
 
     tasks: List[Task] = Field(default_factory=list)
