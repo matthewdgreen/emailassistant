@@ -169,95 +169,169 @@ def _extract_bodies_from_payload(payload: dict) -> (str, Optional[str]):
     return body_text, body_html
 
 
+def _build_email_summary_from_full_message(msg_id: str, full: dict) -> EmailSummary:
+    """
+    Construct an EmailSummary from a full Gmail message resource returned by
+    users().messages().get(..., format="metadata").
+    """
+    headers = {h["name"]: h["value"] for h in full.get("payload", {}).get("headers", [])}
+    subject = headers.get("Subject", "")
+    from_header = headers.get("From", "")
+
+    # Parse email address from "Name <email@domain>"
+    _, email_addr = parseaddr(from_header)
+
+    internal_date_ms = int(full.get("internalDate", "0") or 0)
+    received_at = datetime.fromtimestamp(internal_date_ms / 1000.0, tz=timezone.utc)
+
+    return EmailSummary(
+        id=msg_id,
+        thread_id=full.get("threadId", ""),
+        subject=subject,
+        sender_email=email_addr or from_header,
+        received_at=received_at,
+    )
+
 # ---------------------------------------------------------------------------
 # Listing unread summaries
 # ---------------------------------------------------------------------------
 
+from typing import List
+from datetime import datetime, timezone  # make sure timezone is imported
+
+from .models import EmailSummary
+
+
+from typing import List
+from datetime import datetime, timezone  # make sure timezone is imported
+
+from .models import EmailSummary
+
+
+from datetime import datetime, timezone
+from typing import List
+from email.utils import parseaddr
+
+from .models import EmailSummary
 
 def list_unread_summaries_since(
     service,
-    since_datetime: Optional[datetime],
+    since_datetime: datetime,
+    max_results: int = 150,
+) -> List[EmailSummary]:
+    """
+    List UNREAD email summaries in INBOX since a given time.
+
+    This is used by the normal daily run.
+    """
+    since_ts = int(since_datetime.timestamp())
+    query = f"label:INBOX is:unread after:{since_ts}"
+    logger.info("Listing unread summaries with query=%r max_results=%d", query, max_results)
+
+    results = (
+        service.users()
+        .messages()
+        .list(userId="me", q=query, maxResults=max_results)
+        .execute()
+        or {}
+    )
+    messages = results.get("messages", [])
+
+    summaries: List[EmailSummary] = []
+    for msg in messages:
+        msg_id = msg["id"]
+        full = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=msg_id,
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date", "To"],
+            )
+            .execute()
+        )
+
+        summaries.append(_build_email_summary_from_full_message(msg_id, full))
+
+    return summaries
+
+
+
+
+from datetime import datetime  # already imported
+from typing import List
+
+from .models import EmailSummary
+
+from datetime import datetime
+from typing import List
+
+from .models import EmailSummary
+
+
+from datetime import datetime
+from typing import List
+
+from .models import EmailSummary
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def list_unread_summaries_between(
+    service,
+    start_datetime: datetime,
+    end_datetime: datetime,
     max_results: int = 50,
 ) -> List[EmailSummary]:
     """
-    Return a list of EmailSummary objects for unread messages in INBOX
-    since the given datetime (UTC).
+    List INBOX email summaries between start_datetime (inclusive) and
+    end_datetime (exclusive).
 
-    If since_datetime is None, we simply query for unread in INBOX and rely on
-    max_results to limit volume.
+    NOTE:
+      - Includes BOTH read and unread messages.
+      - Used by the multi-day rescan path.
     """
-    query_parts = ["label:INBOX", "is:unread"]
-    if since_datetime is not None:
-        # Gmail 'after' uses seconds since epoch UTC
-        ts = int(since_datetime.replace(tzinfo=timezone.utc).timestamp())
-        query_parts.append(f"after:{ts}")
-    query = " ".join(query_parts)
+    start_ts = int(start_datetime.timestamp())
+    end_ts = int(end_datetime.timestamp())
 
-    logger.info("Listing unread summaries with query=%r max_results=%d", query, max_results)
+    # IMPORTANT: no "is:unread" here – we want read + unread
+    query = f"label:INBOX after:{start_ts} before:{end_ts}"
+    logger.info(
+        "Listing INBOX summaries (read+unread) with query=%r max_results=%d",
+        query,
+        max_results,
+    )
 
-    results: List[EmailSummary] = []
+    results = (
+        service.users()
+        .messages()
+        .list(userId="me", q=query, maxResults=max_results)
+        .execute()
+        or {}
+    )
+    messages = results.get("messages", [])
 
-    try:
-        response = (
+    summaries: List[EmailSummary] = []
+    for msg in messages:
+        msg_id = msg["id"]
+        full = (
             service.users()
             .messages()
-            .list(userId="me", q=query, maxResults=max_results)
+            .get(
+                userId="me",
+                id=msg_id,
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date", "To"],
+            )
             .execute()
         )
-    except HttpError as e:
-        logger.exception("Error listing messages from Gmail: %s", e)
-        return results
 
-    message_refs = response.get("messages", []) or []
-    if not message_refs:
-        return results
+        summaries.append(_build_email_summary_from_full_message(msg_id, full))
 
-    for msg_ref in message_refs:
-        msg_id = msg_ref.get("id")
-        if not msg_id:
-            continue
+    return summaries
 
-        try:
-            msg = (
-                service.users()
-                .messages()
-                .get(
-                    userId="me",
-                    id=msg_id,
-                    format="metadata",
-                    metadataHeaders=["From", "Subject", "Date"],
-                )
-                .execute()
-            )
-        except HttpError as e:
-            logger.exception("Error fetching message %s: %s", msg_id, e)
-            continue
-
-        thread_id = msg.get("threadId", msg_id)
-        snippet = msg.get("snippet", "")
-
-        payload = msg.get("payload", {}) or {}
-        headers = payload.get("headers", []) or []
-
-        h_from = _parse_header(headers, "From") or ""
-        h_subject = _parse_header(headers, "Subject") or "(no subject)"
-        h_date = _parse_header(headers, "Date") or ""
-
-        sender_name, sender_email = _parse_from_header(h_from)
-        received_at = _parse_date_header(h_date)
-
-        summary = EmailSummary(
-            id=msg_id,
-            thread_id=thread_id,
-            sender_name=sender_name,
-            sender_email=sender_email,
-            received_at=received_at,
-            subject=h_subject,
-            snippet=snippet,
-        )
-        results.append(summary)
-
-    return results
 
 
 # ---------------------------------------------------------------------------

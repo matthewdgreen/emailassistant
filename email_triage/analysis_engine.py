@@ -34,7 +34,7 @@ from .storage import (
     save_state,
     load_instructions,
 )
-from .gmail_client import build_gmail_service, list_unread_summaries_since, fetch_email_bodies
+from .gmail_client import build_gmail_service, list_unread_summaries_since, list_unread_summaries_between, fetch_email_bodies
 from .llm_client import call_llm_json, LLMError
 from .prompts import build_pass1_messages, build_pass2_messages
 
@@ -352,6 +352,189 @@ def run_daily_analysis(
 
     return daily_summary
 
+
+def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
+    """
+    Multi-day rescan: for each of the past N days, run a full one-day analysis.
+
+    - For each day, we:
+        * Fetch unread summaries for that day only.
+        * Run the two-pass LLM analysis for that day's emails.
+        * Apply task operations and sender updates incrementally.
+    - We do NOT update state.last_run_at.
+    - We return a list of DailySummary objects, one per day that had emails.
+    """
+    logger.info("Starting multi-day rescan for last %d days.", days)
+
+    # Load stateful bits once
+    state = load_state(config)  # not modified here
+    known_senders = load_known_senders(config)
+    tasks_file = load_tasks(config)
+    instructions_text = load_instructions(config)
+
+    service = build_gmail_service(config)
+
+    now = datetime.now(timezone.utc)
+    today = now.date()
+
+    # Build day windows from oldest to newest
+    windows: List[tuple[date, datetime, datetime]] = []
+    for offset in range(days, 0, -1):
+        day = today - timedelta(days=offset - 1)
+        start = datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        windows.append((day, start, end))
+
+    all_summaries: List[DailySummary] = []
+
+    from .models import TaskOperation as TaskOperationModel
+    from .models import DailySummary as DailySummaryModel
+
+    for day, start, end in windows:
+        logger.info(
+            "Rescan: processing window %s (%s to %s)",
+            day.isoformat(),
+            start.isoformat(),
+            end.isoformat(),
+        )
+
+        unread_summaries = list_unread_summaries_between(
+            service,
+            start_datetime=start,
+            end_datetime=end,
+            max_results=config.max_emails_per_run,
+        )
+
+        logger.info(
+            "Rescan: found %d unread summaries for %s",
+            len(unread_summaries),
+            day.isoformat(),
+        )
+
+        if not unread_summaries:
+            # No emails that day; skip
+            continue
+
+        # ----- Pass 1 -----
+        try:
+            messages1 = build_pass1_messages(
+                unread_summaries,
+                known_senders,
+                tasks_file,
+                instructions_text=instructions_text,
+            )
+            raw1 = call_llm_json(config, messages1, max_tokens=2000, temperature=0.2)
+        except LLMError as e:
+            logger.exception("Rescan pass 1 LLM error for %s: %s", day.isoformat(), e)
+            # Record a fallback summary for that day and continue
+            fallback = _fallback_summary_on_llm_error(e)
+            fallback.summary_date = day
+            all_summaries.append(fallback)
+            continue
+
+        emails_to_expand = raw1.get("emails_to_expand") or []
+        raw_task_ops1 = raw1.get("task_ops") or []
+
+        preliminary_task_ops: List[TaskOperationModel] = []
+        for op_dict in raw_task_ops1:
+            try:
+                op = TaskOperationModel.model_validate(op_dict)
+                preliminary_task_ops.append(op)
+            except ValidationError as ve:
+                logger.warning(
+                    "Rescan: skipping invalid TaskOperation from pass1 (%s): %s",
+                    day.isoformat(),
+                    ve,
+                )
+
+        # Fetch full bodies
+        expanded_bodies = []
+        if emails_to_expand:
+            expanded_bodies = fetch_email_bodies(service, emails_to_expand)
+            logger.info(
+                "Rescan: fetched %d email bodies for %s",
+                len(expanded_bodies),
+                day.isoformat(),
+            )
+
+        # ----- Pass 2 -----
+        try:
+            messages2 = build_pass2_messages(
+                expanded_emails=expanded_bodies,
+                known_senders=known_senders,
+                tasks=tasks_file,
+                preliminary_task_ops=preliminary_task_ops,
+                instructions_text=instructions_text,
+            )
+            raw2 = call_llm_json(config, messages2, max_tokens=2500, temperature=0.2)
+        except LLMError as e:
+            logger.exception("Rescan pass 2 LLM error for %s: %s", day.isoformat(), e)
+            fallback = _fallback_summary_on_llm_error(e)
+            fallback.summary_date = day
+            all_summaries.append(fallback)
+            continue
+
+        raw_updated_senders = raw2.get("updated_senders") or []
+        raw_final_ops = raw2.get("final_task_ops") or []
+        raw_daily_summary = raw2.get("daily_summary") or {}
+
+        updated_sender_profiles: List[SenderProfile] = []
+        for s_dict in raw_updated_senders:
+            try:
+                s = SenderProfile.model_validate(s_dict)
+                updated_sender_profiles.append(s)
+            except ValidationError as ve:
+                logger.warning(
+                    "Rescan: skipping invalid SenderProfile from pass2 (%s): %s",
+                    day.isoformat(),
+                    ve,
+                )
+
+        final_task_ops: List[TaskOperationModel] = []
+        for op_dict in raw_final_ops:
+            try:
+                op = TaskOperationModel.model_validate(op_dict)
+                final_task_ops.append(op)
+            except ValidationError as ve:
+                logger.warning(
+                    "Rescan: skipping invalid TaskOperation from pass2 (%s): %s",
+                    day.isoformat(),
+                    ve,
+                )
+
+        try:
+            daily_summary = DailySummaryModel.model_validate(raw_daily_summary)
+        except ValidationError as ve:
+            logger.exception(
+                "Rescan: failed to validate DailySummary for %s: %s",
+                day.isoformat(),
+                ve,
+            )
+            fallback = _fallback_summary_on_llm_error(ve)
+            fallback.summary_date = day
+            all_summaries.append(fallback)
+            continue
+
+        # Override the summary_date to the day we are analyzing
+        daily_summary.summary_date = day
+
+        # Apply task ops and sender updates IN-PLACE (cumulative across days)
+        tasks_file = apply_task_operations(tasks_file, final_task_ops)
+        known_senders = merge_sender_updates(known_senders, updated_sender_profiles)
+
+        all_summaries.append(daily_summary)
+
+    # Persist updated tasks & senders once at the end
+    save_tasks(config, tasks_file)
+    save_known_senders(config, known_senders)
+
+    logger.info(
+        "Multi-day rescan complete: %d daily summaries produced, %d tasks total.",
+        len(all_summaries),
+        len(tasks_file.tasks),
+    )
+
+    return all_summaries
 
 # ---------------------------------------------------------------------------
 # Fallback summary helpers

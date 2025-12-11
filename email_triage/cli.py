@@ -9,7 +9,7 @@ from rich.table import Table
 
 from .config import load_config
 from .logging_config import setup_logging
-from .analysis_engine import run_daily_analysis, apply_task_operations
+from .analysis_engine import run_daily_analysis, apply_task_operations, run_rescan_days
 from .daily_runner import generate_daily_summary_text, write_daily_summary_to_file
 from .storage import (
     ensure_data_files_exist,
@@ -232,22 +232,47 @@ def cmd_complete_task(args: argparse.Namespace) -> None:
 
 
 def cmd_rescan_days(args: argparse.Namespace) -> None:
+    """
+    Re-run analysis over the past N days, one full analysis per day.
+
+    This does NOT update state.last_run_at, but it DOES apply task and sender
+    updates cumulatively.
+    """
     config = load_config()
     setup_logging()
     ensure_data_files_exist(config)
 
-    from .analysis_engine import run_daily_analysis as _run
-
     days = args.days
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    logging.info("Rescanning past %d days, day-by-day.", days)
 
-    logging.info("Rescanning past %d days (since %s)...", days, since.isoformat())
+    summaries = run_rescan_days(config, days=days)
 
-    summary = _run(config, since_override=since, update_state=False)
-    text = generate_daily_summary_text(summary)
-    path = write_daily_summary_to_file(config, text)
-    print(text)
-    logging.info("Rescan summary written to %s", path)
+    from .daily_runner import generate_daily_summary_text  # to avoid cycles
+    output_dir = config.daily_summary_output_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    last_text = None
+
+    for summary in summaries:
+        text = generate_daily_summary_text(summary)
+        last_text = text
+        fname = output_dir / f"daily_summary_{summary.summary_date.isoformat()}.md"
+        fname.write_text(text, encoding="utf-8")
+        print("")
+        print(f"===== Summary for {summary.summary_date.isoformat()} =====")
+        print(text)
+        logging.info("Wrote rescan summary for %s to %s", summary.summary_date, fname)
+
+    # Also write the last summary (if any) to the default daily_summary.md
+    if last_text is not None:
+        default_path = config.daily_summary_output_path
+        default_path.write_text(last_text, encoding="utf-8")
+        logging.info("Wrote most recent rescan summary to %s", default_path)
+    else:
+        print("No summaries were produced for the requested window.")
+
+    if args.instruct:
+        _interactive_instructions_update()
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +398,12 @@ def main() -> None:
         default=3,
         help="Number of days back to scan (default: 3).",
     )
+    p_rescan.add_argument(
+        "--instruct",
+        action="store_true",
+        help="After rescanning, prompt for feedback and refine instructions.txt via the LLM.",
+    )
+
 
     # list-senders
     subparsers.add_parser(
