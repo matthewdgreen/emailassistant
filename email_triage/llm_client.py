@@ -114,6 +114,7 @@ def call_llm_json(
         logger.exception("Failed to decode JSON from LLM HTTP response: %s", e)
         raise LLMError("Invalid JSON from LLM HTTP response.") from e
 
+
     try:
         choices = data.get("choices")
         if not choices:
@@ -123,27 +124,33 @@ def call_llm_json(
         logger.exception("Unexpected structure in LLM response: %s", e)
         raise LLMError("Unexpected structure in LLM response.") from e
 
-    # At this point, with response_format={"type": "json_object"}, `content`
-    # should already be a JSON object (string) representing a single dict.
+    # With response_format={"type": "json_object"}, `content` *should* be JSON.
     try:
-        # If the server ever returns a structured object directly, accept it.
         if isinstance(content, dict):
+            # Some servers may already return parsed JSON here.
             return content
 
         if not isinstance(content, str):
             raise LLMError(f"LLM content is neither string nor dict: {type(content)}")
 
-        # First, try to parse the content as-is.
+        # First, try to parse as-is
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            # Fallback: use our legacy extractor to strip fences / extra text.
+            # Fallback: use legacy extractor (handles ```json fences, leading text, etc.)
             json_str = _extract_json_from_text(content)
             return json.loads(json_str)
 
     except Exception as e:
+        # Log a snippet of the raw content to help debug JSON issues
+        snippet = content if isinstance(content, str) else repr(content)
+        logger.error(
+            "Raw LLM content that failed JSON parse (first 1000 chars): %s",
+            snippet[:1000],
+        )
         logger.exception("Failed to parse JSON from LLM content: %s", e)
         raise LLMError(f"Failed to parse JSON from LLM content: {e}") from e
+
 
 
 
