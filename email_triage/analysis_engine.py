@@ -287,7 +287,6 @@ def run_daily_analysis(
     # -----------------------------
     # Pass 2: with full bodies
     # -----------------------------
-    from .models import DailySummary as DailySummaryModel  # for clarity
 
     try:
         messages2 = build_pass2_messages(
@@ -335,6 +334,9 @@ def run_daily_analysis(
         except ValidationError as ve:
             logger.warning("Skipping invalid TaskOperation from pass2: %s", ve)
 
+
+    from .models import DailySummary as DailySummaryModel
+    
     try:
         daily_summary = DailySummaryModel.model_validate(raw_daily_summary)
     except ValidationError as ve:
@@ -376,8 +378,8 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
     """
     logger.info("Starting multi-day rescan for last %d days.", days)
 
-    # Load stateful bits once
-    _state = load_state(config)  # not modified here
+    # Load stateful bits once (we don't modify state here)
+    state = load_state(config)  # noqa: F841  # currently unused
     known_senders = load_known_senders(config)
     tasks_file = load_tasks(config)
     instructions_text = load_instructions(config)
@@ -405,6 +407,7 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
             end.isoformat(),
         )
 
+        # This now includes read + unread, for INBOX only
         unread_summaries = list_unread_summaries_between(
             service,
             start_datetime=start,
@@ -442,19 +445,16 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
         emails_to_expand = raw1.get("emails_to_expand") or []
         raw_task_ops1 = raw1.get("task_ops") or []
 
-        preliminary_task_ops: List[TaskOperationModel] = []
+        preliminary_task_ops: List[TaskOperation] = []
         for op_dict in raw_task_ops1:
             try:
                 # ----- normalize TaskOperation (same as run_daily_analysis) -----
-                # Allow "operation" as an alias for "op"
                 if "operation" in op_dict and "op" not in op_dict:
                     op_dict["op"] = op_dict.pop("operation")
 
-                # Normalize op to lowercase string
                 if "op" in op_dict and isinstance(op_dict["op"], str):
                     op_dict["op"] = op_dict["op"].lower()
 
-                # Clean up nested task payload a bit
                 task_dict = op_dict.get("task")
                 if isinstance(task_dict, dict):
                     for ts_key in ("created_at", "updated_at"):
@@ -463,9 +463,9 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
                     op_dict["task"] = task_dict
                 # ----- end normalization -----
 
-                op = TaskOperationModel.model_validate(op_dict)
+                op = TaskOperation.model_validate(op_dict)
                 preliminary_task_ops.append(op)
-            except Exception as ve:
+            except ValidationError as ve:
                 logger.warning(
                     "Rescan: skipping invalid TaskOperation from pass1 (%s): %s",
                     day.isoformat(),
@@ -508,14 +508,14 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
             try:
                 s = SenderProfile.model_validate(s_dict)
                 updated_sender_profiles.append(s)
-            except Exception as ve:
+            except ValidationError as ve:
                 logger.warning(
                     "Rescan: skipping invalid SenderProfile from pass2 (%s): %s",
                     day.isoformat(),
                     ve,
                 )
 
-        final_task_ops: List[TaskOperationModel] = []
+        final_task_ops: List[TaskOperation] = []
         for op_dict in raw_final_ops:
             try:
                 # ----- normalize TaskOperation (same as run_daily_analysis) -----
@@ -533,9 +533,9 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
                     op_dict["task"] = task_dict
                 # ----- end normalization -----
 
-                op = TaskOperationModel.model_validate(op_dict)
+                op = TaskOperation.model_validate(op_dict)
                 final_task_ops.append(op)
-            except Exception as ve:
+            except ValidationError as ve:
                 logger.warning(
                     "Rescan: skipping invalid TaskOperation from pass2 (%s): %s",
                     day.isoformat(),
@@ -544,7 +544,7 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
 
         try:
             daily_summary = DailySummary.model_validate(raw_daily_summary)
-        except Exception as ve:
+        except ValidationError as ve:
             logger.exception(
                 "Rescan: failed to validate DailySummary for %s: %s",
                 day.isoformat(),
@@ -575,6 +575,7 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
     )
 
     return all_summaries
+
 
 # ---------------------------------------------------------------------------
 # Fallback summary helpers
