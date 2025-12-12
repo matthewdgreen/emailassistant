@@ -4,7 +4,8 @@ Email triage instructions
 - Prioritize emails from pinned or high-importance senders.
 - Students, collaborators, and family are generally high priority.
 - Do NOT prioritize or summarize defense invitations, announcements, conference or summit invitations.
-- Do NOT summarize broad department-wide emails unless they contain an emergency or urgent action requiring my attention.
+- Do NOT summarize broad department-wide or faculty-wide announcements unless they contain an emergency or urgent action specifically directed to me.
+- Ignore broad program announcements sent to the whole faculty or department unless they include specific requests sent directly to me.
 - Ignore GitHub alerts unless they involve billing emergencies.
 - Bulk notifications, newsletters, and automated alerts are lower priority unless they mention deadlines or urgent actions.
 - For each important email, create or update tasks that clearly state what I need to do and by when.
