@@ -362,21 +362,39 @@ def run_daily_analysis(
             logger.warning("Skipping invalid SenderProfile from pass2: %s", ve)
 
     final_task_ops: List[TaskOperation] = []
-    for op_dict in raw_final_ops:
-        try:
-            if "operation" in op_dict and "op" not in op_dict:
-                op_dict["op"] = op_dict.pop("operation")
 
-            if "op" in op_dict and isinstance(op_dict["op"], str):
-                op_dict["op"] = op_dict["op"].lower()
+for op_dict in raw_final_ops:
+    try:
+        # Allow "operation" as an alias for "op"
+        if "operation" in op_dict and "op" not in op_dict:
+            op_dict["op"] = op_dict.pop("operation")
 
-            task_dict = op_dict.get("task")
-            if isinstance(task_dict, dict):
-                for ts_key in ("created_at", "updated_at"):
-                    if task_dict.get(ts_key) is None:
-                        task_dict.pop(ts_key, None)
-                op_dict["task"] = task_dict
+        # Normalize op to lowercase
+        if "op" in op_dict and isinstance(op_dict["op"], str):
+            op_dict["op"] = op_dict["op"].lower()
 
+        task_dict = op_dict.get("task")
+        if isinstance(task_dict, dict):
+            # Strip null timestamps so Task doesn't complain
+            for ts_key in ("created_at", "updated_at"):
+                if task_dict.get(ts_key) is None:
+                    task_dict.pop(ts_key, None)
+            op_dict["task"] = task_dict
+
+            # <<< NEW >>> if this is an UPDATE with an embedded task but no task_id/fields,
+            # derive them from task.id and selected fields.
+            if op_dict.get("op") == "update":
+                if "task_id" not in op_dict and "id" in task_dict:
+                    op_dict["task_id"] = task_dict["id"]
+
+                if "fields" not in op_dict:
+                    fields: dict = {}
+                    for k in ("description", "status", "priority", "due_date"):
+                        if k in task_dict:
+                            fields[k] = task_dict[k]
+                    if fields:
+                        op_dict["fields"] = fields
+    
             op = TaskOperation.model_validate(op_dict)
             final_task_ops.append(op)
         except ValidationError as ve:
@@ -566,20 +584,34 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
         final_task_ops: List[TaskOperation] = []
         for op_dict in raw_final_ops:
             try:
-                # ----- normalize TaskOperation (same as run_daily_analysis) -----
+                # Allow "operation" as an alias for "op"
                 if "operation" in op_dict and "op" not in op_dict:
                     op_dict["op"] = op_dict.pop("operation")
 
+                # Normalize op to lowercase
                 if "op" in op_dict and isinstance(op_dict["op"], str):
                     op_dict["op"] = op_dict["op"].lower()
 
                 task_dict = op_dict.get("task")
                 if isinstance(task_dict, dict):
+                    # Strip null timestamps so Task doesn't complain
                     for ts_key in ("created_at", "updated_at"):
                         if task_dict.get(ts_key) is None:
                             task_dict.pop(ts_key, None)
                     op_dict["task"] = task_dict
-                # ----- end normalization -----
+                    # <<< NEW >>> handle "update" ops that only provide a full task
+                    if op_dict.get("op") == "update":
+                        if "task_id" not in op_dict and "id" in task_dict:
+                            op_dict["task_id"] = task_dict["id"]
+
+                        if "fields" not in op_dict:
+                            fields: dict = {}
+                            for k in ("description", "status", "priority", "due_date"):
+                                if k in task_dict:
+                                    fields[k] = task_dict[k]
+                            if fields:
+                                op_dict["fields"] = fields
+                        
 
                 op = TaskOperation.model_validate(op_dict)
                 final_task_ops.append(op)
