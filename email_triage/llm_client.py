@@ -123,9 +123,28 @@ def call_llm_json(
         logger.exception("Unexpected structure in LLM response: %s", e)
         raise LLMError("Unexpected structure in LLM response.") from e
 
+    # At this point, with response_format={"type": "json_object"}, `content`
+    # should already be a JSON object (string) representing a single dict.
     try:
-        json_str = _extract_json_from_text(content)
-        return json.loads(json_str)
+        # If the server ever returns a structured object directly, accept it.
+        if isinstance(content, dict):
+            return content
+
+        if not isinstance(content, str):
+            raise LLMError(f"LLM content is neither string nor dict: {type(content)}")
+
+        # First, try to parse the content as-is.
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # Fallback: use our legacy extractor to strip fences / extra text.
+            json_str = _extract_json_from_text(content)
+            return json.loads(json_str)
+
     except Exception as e:
         logger.exception("Failed to parse JSON from LLM content: %s", e)
         raise LLMError(f"Failed to parse JSON from LLM content: {e}") from e
+
+
+
+
