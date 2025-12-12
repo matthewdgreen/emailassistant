@@ -50,12 +50,6 @@ def generate_daily_summary_text(summary: DailySummary) -> str:
                 lines.append("   - **Outline:**")
                 for bullet in sr.draft_outline:
                     lines.append(f"     - {bullet}")
-            if sr.full_draft:
-                lines.append("   - **Draft:**")
-                lines.append("")
-                for line in sr.full_draft.splitlines():
-                    lines.append(f"     {line}")
-                lines.append("")
             lines.append("")
 
     # ------------------------------------------------------------------

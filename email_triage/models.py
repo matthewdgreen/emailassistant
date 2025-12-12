@@ -325,21 +325,20 @@ class CriticalEmailEntry(BaseModel):
         arbitrary_types_allowed=False,
     )
 
-
 class SuggestedResponse(BaseModel):
-    """
-    Suggested response for an email, possibly including a full draft.
-    """
+    """Suggested response for an email.
 
+    For robustness, we only store a short outline as a list of bullet points.
+    If you want full drafts later we can add a separate mechanism that
+    generates them on-demand for a single email.
+    """
     email_id: str
     draft_outline: List[str]
-    full_draft: Optional[str] = None
 
     model_config = ConfigDict(
         populate_by_name=True,
         arbitrary_types_allowed=False,
     )
-
 
 class DailySummary(BaseModel):
     """
