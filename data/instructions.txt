@@ -5,7 +5,7 @@ Email triage instructions
 - The second highest priority is emails sent directly to me from the dean (Ed Schlesinger), my department chair (Randal Burns), or Serena Savino.
 - Prioritize emails from pinned or other high-importance senders.
 - Students, collaborators, and family are generally high priority.
-- Do NOT prioritize or summarize defense invitations, announcements, conference or summit invitations.
+- Do NOT prioritize or summarize defense invitations, announcements, conference or summit invitations, or general announcements such as promotions or PhD defenses.
 - Do NOT summarize broad department-wide or faculty-wide announcements unless they contain an emergency or urgent action specifically directed to me.
 - Ignore broad program announcements sent to the whole faculty or department unless they include specific requests sent directly to me.
 - Ignore GitHub alerts unless they involve billing emergencies.

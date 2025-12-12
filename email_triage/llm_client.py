@@ -145,8 +145,8 @@ def call_llm_json(
         # Log a snippet of the raw content to help debug JSON issues
         snippet = content if isinstance(content, str) else repr(content)
         logger.error(
-            "Raw LLM content that failed JSON parse (first 1000 chars): %s",
-            snippet[:1000],
+            "Raw LLM content that failed JSON parse (first 2000 chars): %s",
+            snippet[:2000],
         )
         logger.exception("Failed to parse JSON from LLM content: %s", e)
         raise LLMError(f"Failed to parse JSON from LLM content: {e}") from e
