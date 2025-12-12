@@ -57,45 +57,84 @@ def _generate_task_id(tasks_file: TasksFile) -> str:
         i += 1
 
 
-def apply_task_operations(tasks_file: TasksFile, ops: Iterable[TaskOperation]) -> TasksFile:
+def _next_task_id(tasks_file: TasksFile) -> str:
     """
-    Apply a list of TaskOperations to a TasksFile and return the updated file.
+    Generate a simple monotonic task id like 'task-0001', 'task-0002', ...
+    based on existing tasks in the file.
+    """
+    max_n = 0
+    for t in tasks_file.tasks:
+        if not t.id:
+            continue
+        if not t.id.startswith("task-"):
+            continue
+        try:
+            n = int(t.id.split("-", 1)[1])
+            if n > max_n:
+                max_n = n
+        except Exception:
+            continue
+    return f"task-{max_n + 1:04d}"
 
-    Safeguards:
-    - If an UPDATE or CLOSE refers to a non-existent task_id, we log a warning and skip it.
-    - CLOSE only marks tasks as DONE; we never delete tasks.
+
+def apply_task_operations(tasks_file: TasksFile, ops: List[TaskOperation]) -> TasksFile:
     """
-    tasks_by_id = {t.id: t for t in tasks_file.tasks}
+    Apply a list of TaskOperation objects to the current tasks_file and return the updated file.
+
+    - ADD:    append a new task (assign id if missing)
+    - UPDATE: patch an existing task by id
+    - CLOSE:  mark an existing task as DONE
+    """
+    # Build an index for convenience
+    tasks_by_id = {t.id: t for t in tasks_file.tasks if t.id}
 
     for op in ops:
         try:
             if op.op == TaskOperationType.ADD:
                 if op.task is None:
-                    logger.warning("ADD operation without task payload; skipping.")
+                    logger.warning("ADD operation without 'task'; skipping.")
                     continue
-                task = op.task
-                # Assign ID if empty or None
-                if not task.id:
-                    task_id = _generate_task_id(tasks_file)
-                    task.id = task_id
-                elif task.id in tasks_by_id:
-                    logger.warning("ADD operation with existing task_id=%s; skipping.", task.id)
-                    continue
-                now = datetime.utcnow().replace(tzinfo=timezone.utc)
-                task.created_at = now
-                task.updated_at = now
-                tasks_by_id[task.id] = task
+
+                new_task: Task = op.task
+
+                # Assign id if missing
+                if not new_task.id:
+                    new_task.id = _next_task_id(tasks_file)
+
+                now = datetime.now(timezone.utc)
+                new_task.created_at = now
+                new_task.updated_at = now
+
+                tasks_file.tasks.append(new_task)
+                tasks_by_id[new_task.id] = new_task
 
             elif op.op == TaskOperationType.UPDATE:
                 if not op.task_id:
                     logger.warning("UPDATE operation without task_id; skipping.")
                     continue
                 if op.task_id not in tasks_by_id:
-                    logger.warning("UPDATE operation for unknown task_id=%s; skipping.", op.task_id)
+                    logger.warning(
+                        "UPDATE operation for unknown task_id=%s; skipping.",
+                        op.task_id,
+                    )
                     continue
+
                 task = tasks_by_id[op.task_id]
-                fields = op.fields or {}
-                for key, value in fields.items():
+
+                if op.fields is None:
+                    logger.warning(
+                        "UPDATE operation for task_id=%s has no fields; skipping.",
+                        op.task_id,
+                    )
+                    continue
+
+                # Turn TaskUpdateFields model into a dict of changed fields
+                fields_dict = op.fields.model_dump(
+                    exclude_unset=True,
+                    exclude_none=True,
+                )
+
+                for key, value in fields_dict.items():
                     if not hasattr(task, key):
                         logger.debug(
                             "Ignoring unknown field '%s' on Task during UPDATE for id=%s",
@@ -104,7 +143,8 @@ def apply_task_operations(tasks_file: TasksFile, ops: Iterable[TaskOperation]) -
                         )
                         continue
                     setattr(task, key, value)
-                task.updated_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+
+                task.updated_at = datetime.now(timezone.utc)
                 tasks_by_id[op.task_id] = task
 
             elif op.op == TaskOperationType.CLOSE:
@@ -112,23 +152,31 @@ def apply_task_operations(tasks_file: TasksFile, ops: Iterable[TaskOperation]) -
                     logger.warning("CLOSE operation without task_id; skipping.")
                     continue
                 if op.task_id not in tasks_by_id:
-                    logger.warning("CLOSE operation for unknown task_id=%s; skipping.", op.task_id)
+                    logger.warning(
+                        "CLOSE operation for unknown task_id=%s; skipping.",
+                        op.task_id,
+                    )
                     continue
+
                 task = tasks_by_id[op.task_id]
                 task.status = TaskStatus.DONE
-                task.updated_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+                task.updated_at = datetime.now(timezone.utc)
                 tasks_by_id[op.task_id] = task
 
             else:
-                logger.warning("Unknown task operation type: %s", op.op)
+                logger.warning("Unknown TaskOperationType op=%s; skipping.", op.op)
 
-        except Exception as e:  # guardrail so one bad op doesn't break everything
-            logger.exception("Error applying task operation %s: %s", op, e)
+        except Exception as e:
+            logger.error(
+                "Error applying task operation op=%s task=%s task_id=%s fields=%s: %s",
+                op.op,
+                op.task,
+                op.task_id,
+                op.fields,
+                e,
+            )
 
-    updated_tasks: List[Task] = list(tasks_by_id.values())
-    # Sort: non-done first, by priority desc, then created_at asc
-    updated_tasks.sort(key=lambda t: (t.status == TaskStatus.DONE, -t.priority, t.created_at))
-    return TasksFile(tasks=updated_tasks)
+    return tasks_file
 
 
 # ---------------------------------------------------------------------------
