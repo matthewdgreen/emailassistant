@@ -296,7 +296,7 @@ def run_daily_analysis(
             tasks_file,
             instructions_text=instructions_text,
         )
-        raw1 = call_llm_json(config, messages1, max_tokens=2000, temperature=0.2)
+        raw1 = call_llm_json(config, messages1, max_tokens=8000, temperature=0.2)
     except LLMError as e:
         logger.exception("Pass 1 LLM error: %s", e)
         return _fallback_summary_on_llm_error(e)
@@ -407,6 +407,7 @@ def run_daily_analysis(
         daily_summary = DailySummaryModel.model_validate(raw_daily_summary)
     except ValidationError as ve:
         logger.exception("Failed to validate DailySummary from LLM: %s", ve)
+        logger.info("raw_daily_summary: %s", raw_daily_summary);
         return _fallback_summary_on_llm_error(ve)
 
     # Apply task ops and sender updates
@@ -499,7 +500,7 @@ def run_rescan_days(config: Config, days: int) -> List[DailySummary]:
                 tasks_file,
                 instructions_text=instructions_text,
             )
-            raw1 = call_llm_json(config, messages1, max_tokens=2000, temperature=0.2)
+            raw1 = call_llm_json(config, messages1, max_tokens=8000, temperature=0.2)
         except LLMError as e:
             logger.exception("Rescan pass 1 LLM error for %s: %s", day.isoformat(), e)
             # Record a fallback summary for that day and continue

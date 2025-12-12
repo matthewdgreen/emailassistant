@@ -63,7 +63,7 @@ def _extract_json_from_text(text: str) -> str:
 def call_llm_json(
     config: Config,
     messages: List[Dict[str, str]],
-    max_tokens: int = 2000,
+    max_tokens: int = 18000,
     temperature: float = 0.2,
     base_url: str = "https://api.openai.com/v1/chat/completions",
 ) -> Dict[str, Any]:
@@ -120,6 +120,18 @@ def call_llm_json(
         if not choices:
             raise LLMError("No choices in LLM response.")
         content = choices[0]["message"]["content"]
+
+        # Logging to determine why JSON parsing is failing, remove me
+        finish_reason = choices[0].get("finish_reason")
+        logger.info(
+            "LLM finish_reason=%s, usage=%s",
+            finish_reason,
+            data.get("usage"),
+        )
+
+        if finish_reason == "length":
+            # This is almost certainly why your JSON is chopped.
+            raise LLMError("LLM output was truncated (finish_reason=length).")
     except Exception as e:
         logger.exception("Unexpected structure in LLM response: %s", e)
         raise LLMError("Unexpected structure in LLM response.") from e
