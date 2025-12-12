@@ -120,6 +120,47 @@ class SenderProfile(BaseModel):
     notes: Optional[str] = None
     last_seen_at: Optional[datetime] = None
 
+    @field_validator("importance", mode="before")
+    @classmethod
+    def normalize_importance(cls, v: Any) -> SenderImportance:
+        # Allow the model to say things like "medium", "important", etc.
+        if isinstance(v, SenderImportance):
+            return v
+        if v is None:
+            return SenderImportance.NORMAL
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in {"high", "important", "critical", "urgent"}:
+                return SenderImportance.HIGH
+            if s in {"low", "unimportant"}:
+                return SenderImportance.LOW
+            if s in {"medium", "normal", "default"}:
+                return SenderImportance.NORMAL
+        # Fallback
+        return SenderImportance.NORMAL
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_role(cls, v: Any) -> SenderRole:
+        # Tolerate "administrative", "academic collaborator", etc.
+        if isinstance(v, SenderRole):
+            return v
+        if v is None:
+            return SenderRole.OTHER
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in {"student", "advisee"}:
+                return SenderRole.STUDENT
+            if s in {"collaborator", "academic collaborator", "research collaborator"}:
+                return SenderRole.COLLABORATOR
+            if s in {"admin", "administrative", "administrator"}:
+                return SenderRole.ADMIN
+            if s in {"family", "relative"}:
+                return SenderRole.FAMILY
+            if s in {"notification", "newsletter", "system", "bot"}:
+                return SenderRole.NOTIFICATION
+        return SenderRole.OTHER
+
     model_config = ConfigDict(
         populate_by_name=True,
         arbitrary_types_allowed=False,
@@ -164,12 +205,39 @@ class Task(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_datetimes(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        # If the LLM sends created_at / updated_at as null, drop them so defaults apply.
+        for key in ("created_at", "updated_at"):
+            if values.get(key) is None:
+                values.pop(key, None)
+        return values
+
     @field_validator("priority")
     @classmethod
     def validate_priority(cls, v: int) -> int:
         if not 1 <= v <= 10:
             raise ValueError("priority must be between 1 and 10")
         return v
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, v: Any) -> TaskStatus:
+        if isinstance(v, TaskStatus):
+            return v
+        if v is None:
+            return TaskStatus.OPEN
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in {"open", "pending", "todo", "to-do"}:
+                return TaskStatus.OPEN
+            if s in {"in_progress", "in-progress", "ongoing", "working"}:
+                return TaskStatus.IN_PROGRESS
+            if s in {"done", "complete", "completed", "closed"}:
+                return TaskStatus.DONE
+        # Fallback
+        return TaskStatus.OPEN
 
     model_config = ConfigDict(
         populate_by_name=True,
