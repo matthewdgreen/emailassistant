@@ -316,23 +316,24 @@ def run_daily_analysis(
 
     final_task_ops: List[TaskOperation] = []
     for op_dict in raw_final_ops:
-    try:
-        if "operation" in op_dict and "op" not in op_dict:
-            op_dict["op"] = op_dict.pop("operation")
+        try:
+            if "operation" in op_dict and "op" not in op_dict:
+                op_dict["op"] = op_dict.pop("operation")
 
-        if "op" in op_dict and isinstance(op_dict["op"], str):
-            op_dict["op"] = op_dict["op"].lower()
+            if "op" in op_dict and isinstance(op_dict["op"], str):
+                op_dict["op"] = op_dict["op"].lower()
 
-        task_dict = op_dict.get("task")
-        if isinstance(task_dict, dict):
-            for ts_key in ("created_at", "updated_at"):
-                if task_dict.get(ts_key) is None:
-                    task_dict.pop(ts_key, None)
-            op_dict["task"] = task_dict
+            task_dict = op_dict.get("task")
+            if isinstance(task_dict, dict):
+                for ts_key in ("created_at", "updated_at"):
+                    if task_dict.get(ts_key) is None:
+                        task_dict.pop(ts_key, None)
+                op_dict["task"] = task_dict
 
-        op = TaskOperation.model_validate(op_dict)
-        final_task_ops.append(op)
-
+            op = TaskOperation.model_validate(op_dict)
+            final_task_ops.append(op)
+        except ValidationError as ve:
+            logger.warning("Skipping invalid TaskOperation from pass2: %s", ve)
 
     try:
         daily_summary = DailySummaryModel.model_validate(raw_daily_summary)
