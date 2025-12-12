@@ -52,7 +52,7 @@ class TaskOperationType(str, Enum):
     ADD = "add"
     UPDATE = "update"
     CLOSE = "close"
-
+    NOOP = "noop"
 
 # ---------------------------------------------------------------------------
 # Email summaries and bodies
@@ -295,6 +295,9 @@ class TaskOperation(BaseModel):
         elif self.op == TaskOperationType.CLOSE:
             if not self.task_id:
                 raise ValueError("CLOSE operation requires 'task_id'")
+        elif op.op == TaskOperationType.NOOP:
+            # Intentionally does nothing
+            logger.debug("Received NOOP task operation for task_id=%s", op.task_id)
         return self
 
     model_config = ConfigDict(

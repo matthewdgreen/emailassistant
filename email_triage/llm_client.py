@@ -11,7 +11,7 @@ import logging
 from typing import Any, Dict, List
 
 import httpx
-
+from .lenient_json import parse_lenient_json
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -124,34 +124,30 @@ def call_llm_json(
         logger.exception("Unexpected structure in LLM response: %s", e)
         raise LLMError("Unexpected structure in LLM response.") from e
 
-    # With response_format={"type": "json_object"}, `content` *should* be JSON.
+    # At this point, with response_format={"type": "json_object"}, `content`
+    # should be a JSON object string. We still run it through a lenient parser
+    # to survive minor syntax issues.
     try:
+        snippet = content if isinstance(content, str) else repr(content)
+        logger.debug("LLM raw content (first 500 chars): %s", snippet[:500])
+
         if isinstance(content, dict):
-            # Some servers may already return parsed JSON here.
+            # Already parsed somehow
             return content
 
         if not isinstance(content, str):
             raise LLMError(f"LLM content is neither string nor dict: {type(content)}")
 
-        # First, try to parse as-is
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            # Fallback: use legacy extractor (handles ```json fences, leading text, etc.)
-            json_str = _extract_json_from_text(content)
-            return json.loads(json_str)
+        return parse_lenient_json(content,config=config,
+            allow_llm_repair=True)
 
     except Exception as e:
-        # Log a snippet of the raw content to help debug JSON issues
+        # Log for debugging and raise a clean error to the caller
         snippet = content if isinstance(content, str) else repr(content)
         logger.error(
-            "Raw LLM content that failed JSON parse (first 2000 chars): %s",
-            snippet[:2000],
+            "Raw LLM content that failed lenient JSON parse (first 1000 chars): %s",
+            snippet[:1000],
         )
         logger.exception("Failed to parse JSON from LLM content: %s", e)
         raise LLMError(f"Failed to parse JSON from LLM content: {e}") from e
-
-
-
-
 
